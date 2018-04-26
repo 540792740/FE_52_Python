@@ -17,17 +17,23 @@ class Seq2SeqModel():
         self.beam_size = beam_size
         self.max_gradient_norm = max_gradient_norm
         self.build_model()
+        #the basic variable of the model
 
     def _create_rnn_cell(self):
         def single_rnn_cell():
             single_cell = tf.contrib.rnn.LSTMCell(self.rnn_size)
-    
+            #this is a single cell, without this, the final model in MultiRNNCell list may be error
+            
             cell = tf.contrib.rnn.DropoutWrapper(single_cell, output_keep_prob=self.keep_prob_placeholder)
             return cell
+        #In the list, every element uses single cell function.
+        
         cell = tf.contrib.rnn.MultiRNNCell([single_rnn_cell() for _ in range(self.num_layers)])
         return cell
     def build_model(self):
         print('building model... ...')
+        #we define the 'placeholder' of the model
+        #---------------------------------------------------------------------------------------------------
         self.encoder_inputs = tf.placeholder(tf.int32, [None, None], name='encoder_inputs')
         self.encoder_inputs_length = tf.placeholder(tf.int32, [None], name='encoder_inputs_length')
 
@@ -35,8 +41,9 @@ class Seq2SeqModel():
         self.keep_prob_placeholder = tf.placeholder(tf.float32, name='keep_prob_placeholder')
 
         self.decoder_targets = tf.placeholder(tf.int32, [None, None], name='decoder_targets')
-        self.decoder_targets_length = tf.placeholder(tf.int32, [None], name='decoder_targets_length')
-
+        self.decoder_targets_length = tf.placeholder(tf.int32, [None], name='decoder_targets_length')   
+        #
+        
         self.max_target_sequence_length = tf.reduce_max(self.decoder_targets_length, name='max_target_len')
         self.mask = tf.sequence_mask(self.decoder_targets_length, self.max_target_sequence_length, dtype=tf.float32, name='masks')
         with tf.variable_scope('encoder'):
