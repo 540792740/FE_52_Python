@@ -1,127 +1,127 @@
 ﻿import tensorflow as tf
-from tensorflow.python.util import nest
-
-
+from seq2seq import embedding_attention_seq2seq
 class Seq2SeqModel():
-    def __init__(self, rnn_size, num_layers, embedding_size, learning_rate, word_to_idx, mode, use_attention,
-                 beam_search, beam_size, max_gradient_norm=5.0):
-        self.learing_rate = learning_rate
-        self.embedding_size = embedding_size
-        self.rnn_size = rnn_size
+
+    def __init__(self, source_vocab_size, target_vocab_size, en_de_seq_len, hidden_size, num_layers,
+                 batch_size, learning_rate, num_samples=1024,
+                 forward_only=False, beam_search=True, beam_size=10):
+        '''
+        Initialize and create a model
+        :param source_vocab_size:input vocab size of encoder
+        :param target_vocab_size: input vocab size of dncoder
+        :param en_de_seq_len: maximum length of source and destination sequences
+        :param hidden_size: the number of hidden layer units in the RNN model
+        :param num_layers: the number of RNN stacks
+        :param batch_size: batch size
+        :param learning_rate
+        :param num_samples: the number of sampled softmax samples when conputing loss
+        :param forward_only: specify as true when predicting
+        :param beam_search: apply greedy search or beam search when predicting
+        :param beam_size: beam search size
+        '''
+        self.source_vocab_size = source_vocab_size
+        self.target_vocab_size = target_vocab_size
+        self.en_de_seq_len = en_de_seq_len
+        self.hidden_size = hidden_size
         self.num_layers = num_layers
-        self.word_to_idx = word_to_idx
-        self.vocab_size = len(self.word_to_idx)
-        self.mode = mode
-        self.use_attention = use_attention
+        self.batch_size = batch_size
+        self.learning_rate = tf.Variable(float(learning_rate), trainable=False)
+        self.num_samples = num_samples
+        self.forward_only = forward_only
         self.beam_search = beam_search
         self.beam_size = beam_size
-        self.max_gradient_norm = max_gradient_norm
-        self.build_model()
-        #the basic variable of the model
+        self.global_step = tf.Variable(0, trainable=False)
 
-    def _create_rnn_cell(self):
-        def single_rnn_cell():
-            single_cell = tf.contrib.rnn.LSTMCell(self.rnn_size)
-            #this is a single cell, without this, the final model in MultiRNNCell list may be error
-            
-            cell = tf.contrib.rnn.DropoutWrapper(single_cell, output_keep_prob=self.keep_prob_placeholder)
-            return cell
-        #In the list, every element uses single cell function.
-        
-        cell = tf.contrib.rnn.MultiRNNCell([single_rnn_cell() for _ in range(self.num_layers)])
-        return cell
-    def build_model(self):
-        print('building model... ...')
-        #we define the 'placeholder' of the model
-        #---------------------------------------------------------------------------------------------------
-        self.encoder_inputs = tf.placeholder(tf.int32, [None, None], name='encoder_inputs')
-        self.encoder_inputs_length = tf.placeholder(tf.int32, [None], name='encoder_inputs_length')
+        output_projection = None
+        softmax_loss_function = None
+        # define the sample loss function to input into sequence_loss_by_example funcion
+        if num_samples > 0 and num_samples < self.target_vocab_size:
+            w = tf.get_variable('proj_w', [hidden_size, self.target_vocab_size])
+            w_t = tf.transpose(w)
+            b = tf.get_variable('proj_b', [self.target_vocab_size])
+            output_projection = (w, b)
+            #call sampled_softmax_loss function to compute sample loss
+            def sample_loss(logits, labels):
+                labels = tf.reshape(labels, [-1, 1])
+                return tf.nn.sampled_softmax_loss(w_t, b, labels=labels, inputs=logits, num_sampled=num_samples, num_classes=self.target_vocab_size)
+            softmax_loss_function = sample_loss
 
-        self.batch_size = tf.placeholder(tf.int32, [], name='batch_size')
-        self.keep_prob_placeholder = tf.placeholder(tf.float32, name='keep_prob_placeholder')
+        self.keep_drop = tf.placeholder(tf.float32)
+        # define multilayer dropout RNNCell of encoder and decoder
+        def create_rnn_cell():
+            encoDecoCell = tf.contrib.rnn.BasicLSTMCell(hidden_size)
+            encoDecoCell = tf.contrib.rnn.DropoutWrapper(encoDecoCell, input_keep_prob=1.0, output_keep_prob=self.keep_drop)
+            return encoDecoCell
+        encoCell = tf.contrib.rnn.MultiRNNCell([create_rnn_cell() for _ in range(num_layers)])
 
-        self.decoder_targets = tf.placeholder(tf.int32, [None, None], name='decoder_targets')
-        self.decoder_targets_length = tf.placeholder(tf.int32, [None], name='decoder_targets_length')   
-        #
-        
-        self.max_target_sequence_length = tf.reduce_max(self.decoder_targets_length, name='max_target_len')
-        self.mask = tf.sequence_mask(self.decoder_targets_length, self.max_target_sequence_length, dtype=tf.float32, name='masks')
-        with tf.variable_scope('encoder'):
+        # define input placeholder
+        self.encoder_inputs = []
+        self.decoder_inputs = []
+        self.decoder_targets = []
+        self.target_weights = []
+        for i in range(en_de_seq_len[0]):
+            self.encoder_inputs.append(tf.placeholder(tf.int32, shape=[None, ], name="encoder{0}".format(i)))
+        for i in range(en_de_seq_len[1]):
+            self.decoder_inputs.append(tf.placeholder(tf.int32, shape=[None, ], name="decoder{0}".format(i)))
+            self.decoder_targets.append(tf.placeholder(tf.int32, shape=[None, ], name="target{0}".format(i)))
+            self.target_weights.append(tf.placeholder(tf.float32, shape=[None, ], name="weight{0}".format(i)))
 
-            encoder_outputs, encoder_state = tf.nn.dynamic_rnn(encoder_cell, encoder_inputs_embedded,
-                                                               sequence_length=self.encoder_inputs_length,
-                                                               dtype=tf.float32)
+        # test model, take the output of the previous moment as input for the next moment
+        if forward_only:
+            if beam_search:#if it is beam_search, call embedding_attention_seq2seq rather than legacy_seq2seq fuction
+                self.beam_outputs, _, self.beam_path, self.beam_symbol = embedding_attention_seq2seq(
+                    self.encoder_inputs, self.decoder_inputs, encoCell, num_encoder_symbols=source_vocab_size,
+                    num_decoder_symbols=target_vocab_size, embedding_size=hidden_size,
+                    output_projection=output_projection, feed_previous=True)
+            else:
+                decoder_outputs, _ = tf.contrib.legacy_seq2seq.embedding_attention_seq2seq(
+                    self.encoder_inputs, self.decoder_inputs, encoCell, num_encoder_symbols=source_vocab_size,
+                    num_decoder_symbols=target_vocab_size, embedding_size=hidden_size,
+                    output_projection=output_projection, feed_previous=True)
+                # because output_projection in seq2seq model is not defined, we need do output_projection after output
+                if output_projection is not None:
+                    self.outputs = tf.matmul(decoder_outputs, output_projection[0]) + output_projection[1]
+        else:
+            # because it is not necessary to use output as the input for the next moment, so do not use output_projection
+            decoder_outputs, _ = tf.contrib.legacy_seq2seq.embedding_attention_seq2seq(
+                self.encoder_inputs, self.decoder_inputs, encoCell, num_encoder_symbols=source_vocab_size,
+                num_decoder_symbols=target_vocab_size, embedding_size=hidden_size, output_projection=output_projection,
+                feed_previous=False)
+            self.loss = tf.contrib.legacy_seq2seq.sequence_loss(
+                decoder_outputs, self.decoder_targets, self.target_weights, softmax_loss_function=softmax_loss_function)
 
-        with tf.variable_scope('decoder'):
-            encoder_inputs_length = self.encoder_inputs_length
+            # Initialize the optimizer
+            opt = tf.train.AdamOptimizer(learning_rate=self.learning_rate, beta1=0.9, beta2=0.999, epsilon=1e-08)
+            self.optOp = opt.minimize(self.loss)
+
+        self.saver = tf.train.Saver(tf.all_variables())
+
+    def step(self, session, encoder_inputs, decoder_inputs, decoder_targets, target_weights, go_token_id):
+        #input a batch of data and train the corresponding model
+        # constructing feed_inpits when sess.run
+        feed_dict = {}
+        if not self.forward_only:
+            feed_dict[self.keep_drop] = 0.5
+            for i in range(self.en_de_seq_len[0]):
+                feed_dict[self.encoder_inputs[i].name] = encoder_inputs[i]
+            for i in range(self.en_de_seq_len[1]):
+                feed_dict[self.decoder_inputs[i].name] = decoder_inputs[i]
+                feed_dict[self.decoder_targets[i].name] = decoder_targets[i]
+                feed_dict[self.target_weights[i].name] = target_weights[i]
+            run_ops = [self.optOp, self.loss]
+        else:
+            feed_dict[self.keep_drop] = 1.0
+            for i in range(self.en_de_seq_len[0]):
+                feed_dict[self.encoder_inputs[i].name] = encoder_inputs[i]
+            feed_dict[self.decoder_inputs[0].name] = [go_token_id]
             if self.beam_search:
-    
-                print("use beamsearch decoding..")
-                encoder_outputs = tf.contrib.seq2seq.tile_batch(encoder_outputs, multiplier=self.beam_size)
-                encoder_state = nest.map_structure(lambda s: tf.contrib.seq2seq.tile_batch(s, self.beam_size), encoder_state)
-                encoder_inputs_length = tf.contrib.seq2seq.tile_batch(self.encoder_inputs_length, multiplier=self.beam_size)
+                run_ops = [self.beam_path, self.beam_symbol]
+            else:
+                run_ops = [self.outputs]
 
-
-            attention_mechanism = tf.contrib.seq2seq.BahdanauAttention(num_units=self.rnn_size, memory=encoder_outputs,
-                                                                     memory_sequence_length=encoder_inputs_length)
-            decoder_cell = self._create_rnn_cell()
-            decoder_cell = tf.contrib.seq2seq.AttentionWrapper(cell=decoder_cell, attention_mechanism=attention_mechanism,
-                                                               attention_layer_size=self.rnn_size, name='Attention_Wrapper')
-         
-            batch_size = self.batch_size if not self.beam_search else self.batch_size * self.beam_size
-
-            decoder_initial_state = decoder_cell.zero_state(batch_size=batch_size, dtype=tf.float32).clone(cell_state=encoder_state)
-            output_layer = tf.layers.Dense(self.vocab_size, kernel_initializer=tf.truncated_normal_initializer(mean=0.0, stddev=0.1))
-
-            if self.mode == 'train':
-
-                training_helper = tf.contrib.seq2seq.TrainingHelper(inputs=decoder_inputs_embedded,
-                                                                    sequence_length=self.decoder_targets_length,
-                                                                    time_major=False, name='training_helper')
-                training_decoder = tf.contrib.seq2seq.BasicDecoder(cell=decoder_cell, helper=training_helper,
-                                                                   initial_state=decoder_initial_state, output_layer=output_layer)
-
-                decoder_outputs, _, _ = tf.contrib.seq2seq.dynamic_decode(decoder=training_decoder,
-                                                                          impute_finished=True,
-                                                                    maximum_iterations=self.max_target_sequence_length)
-
-                self.decoder_logits_train = tf.identity(decoder_outputs.rnn_output)
-                self.decoder_predict_train = tf.argmax(self.decoder_logits_train, axis=-1, name='decoder_pred_train')
-
-                self.loss = tf.contrib.seq2seq.sequence_loss(logits=self.decoder_logits_train,
-                                                             targets=self.decoder_targets, weights=self.mask)
-                tf.summary.scalar('loss', self.loss)
-                self.summary_op = tf.summary.merge_all()
-
-                optimizer = tf.train.AdamOptimizer(self.learing_rate)
-                trainable_params = tf.trainable_variables()
-                gradients = tf.gradients(self.loss, trainable_params)
-                clip_gradients, _ = tf.clip_by_global_norm(gradients, self.max_gradient_norm)
-                self.train_op = optimizer.apply_gradients(zip(clip_gradients, trainable_params))
-            elif self.mode == 'decode':
-                start_tokens = tf.ones([self.batch_size, ], tf.int32) * self.word_to_idx['<go>']
-                end_token = self.word_to_idx['<eos>']
-
-                if self.beam_search:
-                    inference_decoder = tf.contrib.seq2seq.BeamSearchDecoder(cell=decoder_cell, embedding=embedding,
-                                                                             start_tokens=start_tokens, end_token=end_token,
-                                                                             initial_state=decoder_initial_state,
-                                                                             beam_width=self.beam_size,
-                                                                             output_layer=output_layer)
-                else:
-                    decoding_helper = tf.contrib.seq2seq.GreedyEmbeddingHelper(embedding=embedding,
-                                                                               start_tokens=start_tokens, end_token=end_token)
-                    inference_decoder = tf.contrib.seq2seq.BasicDecoder(cell=decoder_cell, helper=decoding_helper,
-                                                                        initial_state=decoder_initial_state,
-                                                                        output_layer=output_layer)
-                decoder_outputs, _, _ = tf.contrib.seq2seq.dynamic_decode(decoder=inference_decoder,
-                                                                maximum_iterations=10)
-
-                if self.beam_search:
-                    self.decoder_predict_decode = decoder_outputs.predicted_ids
-                else:
-                    self.decoder_predict_decode = tf.expand_dims(decoder_outputs.sample_id, -1)
-  
-        self.saver = tf.train.Saver(tf.global_variables())
-
-    
+        outputs = session.run(run_ops, feed_dict)
+        if not self.forward_only:
+            return None, outputs[1]
+        else:
+            if self.beam_search:
+                return outputs[0], outputs[1]
