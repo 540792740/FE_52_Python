@@ -1,4 +1,4 @@
-from __future__ import absolute_import
+﻿from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
@@ -29,27 +29,27 @@ def _extract_beam_search(embedding, beam_size, num_symbols, embedding_size, outp
     def loop_function(prev, i, log_beam_probs, beam_path, beam_symbols):
         if output_projection is not None:
             prev = nn_ops.xw_plus_b(prev, output_projection[0], output_projection[1])
-        # 对输出概率进行归一化和取log，这样序列概率相乘就可以变成概率相加
+        # Normalize output probabilities,then multiplication of sequence probabilities can turn into additions of same
         probs = tf.log(tf.nn.softmax(prev))
         if i == 1:
             probs = tf.reshape(probs[0, :], [-1, num_symbols])
         if i > 1:
-            # 将当前序列的概率与之前序列概率相加得到结果之前有beam_szie个序列，本次产生num_symbols个结果，
-            # 所以reshape成这样的tensor
+            # Before adding the current sequence's probability to the previous one to get num_symbols size results, there are beam_szie list
+            # So reshape into such class of tensor
             probs = tf.reshape(probs + log_beam_probs[-1], [-1, beam_size * num_symbols])
-        # 选出概率最大的前beam_size个序列,从beam_size * num_symbols个元素中选出beam_size个
+        # Select the beam_size sequence with the highest probability from beam_size * num_symbols elements
         best_probs, indices = tf.nn.top_k(probs, beam_size)
         indices = tf.stop_gradient(tf.squeeze(tf.reshape(indices, [-1, 1])))
         best_probs = tf.stop_gradient(tf.reshape(best_probs, [-1, 1]))
 
-        # beam_size * num_symbols，看对应的是哪个序列和单词
+        # beam_size * num_symbols to find corresponding lists and words
         symbols = indices % num_symbols  # Which word in vocabulary.
         beam_parent = indices // num_symbols  # Which hypothesis it came from.
         beam_symbols.append(symbols)
         beam_path.append(beam_parent)
         log_beam_probs.append(best_probs)
 
-        # 对beam-search选出的beam size个单词进行embedding，得到相应的词向量
+        # embedding words to get corresponding vector
         emb_prev = embedding_ops.embedding_lookup(embedding, symbols)
         emb_prev = tf.reshape(emb_prev, [-1, embedding_size])
         return emb_prev
@@ -96,9 +96,8 @@ def beam_attention_decoder(decoder_inputs,
             v.append(variable_scope.get_variable("AttnV_%d" % a, [attention_vec_size]))
 
         state = []
-        # 将encoder的最后一个隐层状态扩展成beam_size维，因为decoder阶段的batch_size是beam_size。
-        # initial_state是一个列表，RNN有多少层就有多少个元素，每个元素都是一个LSTMStateTuple，包含h,c两个隐层状态
-        # 所以要将其扩展成beam_size维，其实是把c和h进行扩展，最后再合成LSTMStateTuple就可以了
+        # expand the last hidden layer of enconder into beam_size dimension
+        # initial_state is a list, every element of RNN is a LSTMStateTuple
         for layers in initial_state:
             c = [layers.c] * beam_size
             h = [layers.h] * beam_size
@@ -150,7 +149,7 @@ def beam_attention_decoder(decoder_inputs,
                 variable_scope.get_variable_scope().reuse_variables()
             # If loop_function is set, we use it instead of decoder_inputs.
             if i == 0:
-                #i=0时，输入时一个batch_szie=beam_size的tensor，且里面每个元素的值都是相同的，都是<GO>标志
+                #when i=0, input a batch_szie=beam_size tensor wich contains same vlue flag elements
                 inp = tf.nn.embedding_lookup(embedding, tf.constant(1, dtype=tf.int32, shape=[beam_size]))
 
             if loop_function is not None and prev is not None:

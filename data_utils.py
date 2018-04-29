@@ -20,7 +20,7 @@ class Batch:
 
 def loadDataset(filename):
     '''
-    读取样本数据
+    load sample data
     :param filename: file path,which is a dictionary,including word2id、id2word,trainingSamples
     :return: word2id, id2word, trainingSamples
     '''
